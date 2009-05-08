@@ -28,8 +28,7 @@ class BaseXMLHandler(object):
         elif name in self.COMPLEX_PROPS:
             self.current_ob = self.COMPLEX_PROPS[name](name)
         elif name in self.SIMPLE_PROPS:
-            print "attrs:", attrs
-            setattr(self, name, attrs)
+            pass
         else:
             print "Got unknown tag", name, "in", self.__class__
             self.current_ob = NoopParser(name)

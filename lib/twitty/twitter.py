@@ -32,7 +32,7 @@ class Twitter(object):
         self.username = user
         self.password = passwd
 
-    def __makeAuthHeader(self, headers=None):
+    def _makeAuthHeader(self, headers=None):
         if not headers:
             headers = {}
         authorization = base64.encodestring('%s:%s'
@@ -40,7 +40,7 @@ class Twitter(object):
         headers['Authorization'] = "Basic %s" % authorization
         return headers
 
-    def __urlencode(self, h):
+    def _urlencode(self, h):
         rv = []
         for k,v in h.iteritems():
             rv.append('%s=%s' %
@@ -84,20 +84,20 @@ class Twitter(object):
 
         return client.getPage((self.base_url + "%s") % path, method='POST',
             agent=self.agent,
-            postdata=body, headers=self.__makeAuthHeader(h))
+            postdata=body, headers=self._makeAuthHeader(h))
 
     def __post(self, path, args={}):
         h = {'Content-Type': 'application/x-www-form-urlencoded'}
         return client.getPage((self.base_url + "%s") % path, method='POST',
             agent=self.agent,
-            postdata=self.__urlencode(args), headers=self.__makeAuthHeader(h))
+            postdata=self._urlencode(args), headers=self._makeAuthHeader(h))
 
     def __get(self, path, delegate, params, feed_factory=txml.Feed):
         url = self.base_url + path
         if params:
-            url += '?' + self.__urlencode(params)
+            url += '?' + self._urlencode(params)
         return client.downloadPage(url, feed_factory(delegate),
-            agent=self.agent, headers=self.__makeAuthHeader())
+            agent=self.agent, headers=self._makeAuthHeader())
 
     def verify_credentials(self):
         "Verify a user's credentials."
@@ -174,9 +174,9 @@ class Twitter(object):
         else:
             url = self.base_url + '/statuses/friends.xml'
         if params:
-            url += '?' + self.__urlencode(params)
+            url += '?' + self._urlencode(params)
         return client.downloadPage(url, txml.Users(delegate),
-            headers=self.__makeAuthHeader())
+            headers=self._makeAuthHeader())
 
     def list_followers(self, delegate, user=None, params=None):
         """Get the list of followers for a user.
@@ -187,9 +187,9 @@ class Twitter(object):
         else:
             url = self.base_url + '/statuses/followers.xml'
         if params:
-            url += '?' + self.__urlencode(params)
+            url += '?' + self._urlencode(params)
         return client.downloadPage(url, txml.Users(delegate),
-            headers=self.__makeAuthHeader())
+            headers=self._makeAuthHeader())
 
     def show_user(self, user):
         """Get the info for a specific user.
@@ -198,7 +198,7 @@ class Twitter(object):
 
         d = defer.Deferred()
         if self.username and self.password:
-            h = self.__makeAuthHeader()
+            h = self._makeAuthHeader()
         else:
             h = {}
         url = '%s/users/show/%s.xml' % (self.base_url, user)
@@ -217,7 +217,7 @@ class Twitter(object):
         if args is None:
             args = {}
         args['q'] = query
-        return client.downloadPage(SEARCH_URL + '?' + self.__urlencode(args),
+        return client.downloadPage(SEARCH_URL + '?' + self._urlencode(args),
             txml.Feed(delegate), agent=self.agent)
 
     def block(self, user):
@@ -239,3 +239,31 @@ class Twitter(object):
         Returns no useful data."""
 
         return self.__postMultipart('/account/update_profile_image.xml', files=(('image', filename, image),))
+
+class TwitterFeed(Twitter):
+    """Realtime feed handling class.
+
+    Results are given one at a time to the delegate.  An example delegate
+    may look like this:
+
+    def exampleDelegate(entry):
+        print entry.text"""
+
+    def _rtfeed(self, url, delegate, args):
+        if args:
+            url += "?" + self._urlencode(args)
+        print "Fetching", url
+        return client.downloadPage(url, txml.HoseFeed(delegate), agent=self.agent,
+                                   headers=self._makeAuthHeader())
+
+    def spritzer(self, delegate, args=None):
+        """Get the spritzer feed."""
+        return self._rtfeed("http://stream.twitter.com/spritzer.xml", delegate, args)
+
+    def gardenhose(self, delegate, args=None):
+        """Get the gardenhose feed."""
+        return self._rtfeed("http://stream.twitter.com/gardenhose.xml", delegate, args)
+
+    def firehose(self, delegate, args=None):
+        """Get the firehose feed."""
+        return self._rtfeed("http://stream.twitter.com/firehose.xml", delegate, args)

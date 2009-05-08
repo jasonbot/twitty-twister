@@ -12,7 +12,7 @@ sys.path.append('lib')
 
 from twisted.internet import reactor, protocol, defer, task
 
-import twitter
+from twitty import twitter
 
 def cb(answer):
     def f(x):

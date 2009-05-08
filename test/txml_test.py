@@ -12,7 +12,7 @@ sys.path.append("../lib")
 
 import unittest
 
-import txml
+from twitty import txml
 
 class XMLParserTest(unittest.TestCase):
 

@@ -12,7 +12,7 @@ sys.path.append('lib')
 
 from twisted.internet import reactor, protocol, defer, task
 
-import twitter
+from twitty import twitter
 
 def gotUser(user):
     print "User:  %s (%s)" % (user.name, user.screen_name)

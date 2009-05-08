@@ -15,7 +15,7 @@ from twisted.python import log
 from twisted.internet import reactor, defer
 from twisted.web import client
 
-import txml
+from . import txml
 
 BASE_URL="http://twitter.com"
 SEARCH_URL="http://search.twitter.com/search.atom"

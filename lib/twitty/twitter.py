@@ -28,7 +28,8 @@ class Twitter(object):
     agent="twitty twister"
 
     def __init__(self, user=None, passwd=None,
-        base_url=BASE_URL, search_url=SEARCH_URL, consumer=None, token=None, signature_method=SIGNATURE_METHOD):
+        base_url=BASE_URL, search_url=SEARCH_URL,
+                 consumer=None, token=None, signature_method=SIGNATURE_METHOD):
 
         self.base_url = base_url
         self.search_url = search_url
@@ -54,13 +55,13 @@ class Twitter(object):
         #    headers[k] = v.encode('utf-8')
         return headers
 
-    def __makeAuthHeader(self, headers={}):
+    def _makeAuthHeader(self, headers={}):
         authorization = base64.encodestring('%s:%s'
             % (self.username, self.password))[:-1]
         headers['Authorization'] = "Basic %s" % authorization
         return headers
 
-    def __urlencode(self, h):
+    def _urlencode(self, h):
         rv = []
         for k,v in h.iteritems():
             rv.append('%s=%s' %
@@ -109,7 +110,7 @@ class Twitter(object):
         if self.use_oauth:
             headers = self.__makeOAuthHeader('POST', url, headers=headers)
         else:
-            headers = self.__makeAuthHeader(h)
+            headers = self._makeAuthHeader(h)
 
         return client.getPage(url, method='POST',
             agent=self.agent,
@@ -123,28 +124,28 @@ class Twitter(object):
         if self.use_oauth:
             headers = self.__makeOAuthHeader('POST', url, args, headers)
         else:
-            headers = self.__makeAuthHeader(headers)
+            headers = self._makeAuthHeader(headers)
 
         return client.getPage(url, method='POST',
             agent=self.agent,
-            postdata=self.__urlencode(args), headers=headers)
+            postdata=self._urlencode(args), headers=headers)
 
     def __get(self, path, delegate, params, feed_factory=txml.Feed, extra_args=None):
         url = self.base_url + path
         if params:
-            url += '?' + self.__urlencode(params)
+            url += '?' + self._urlencode(params)
 
         if self.use_oauth:
             headers = self.__makeOAuthHeader('GET', url)
         else:
-            headers = self.__makeAuthHeader()
+            headers = self._makeAuthHeader()
 
         return client.downloadPage(url, feed_factory(delegate, extra_args),
             agent=self.agent, headers=headers)
 
     def verify_credentials(self):
         "Verify a user's credentials."
-        return self.__post("/account/verify_credentials.xml")
+        return self.__get("/account/verify_credentials.xml", None, None)
 
     def __parsed_post(self, hdef, parser):
         deferred = defer.Deferred()
@@ -176,25 +177,29 @@ class Twitter(object):
         See search for example of how results are returned."""
         if user:
             params['id'] = user
-        return self.__get("/statuses/user_timeline.xml", delegate, params, txml.StatusList, extra_args=extra_args)
+        return self.__get("/statuses/user_timeline.xml", delegate, params,
+                          txml.StatusList, extra_args=extra_args)
 
     def public_timeline(self, delegate, params={}, extra_args=None):
         "Get the most recent public timeline."
 
-        return self.__get("/statuses/public_timeline.atom", delegate, params, extra_args=extra_args)
+        return self.__get("/statuses/public_timeline.atom", delegate, params,
+                          extra_args=extra_args)
 
     def direct_messages(self, delegate, params={}, extra_args=None):
         """Get direct messages for the authenticating user.
 
         Search results are returned one message at a time a DirectMessage
         objects"""
-        return self.__get("/direct_messages.xml", delegate, params, txml.Direct, extra_args=extra_args)
+        return self.__get("/direct_messages.xml", delegate, params,
+                          txml.Direct, extra_args=extra_args)
 
     def replies(self, delegate, params={}, extra_args=None):
         """Get the most recent replies for the authenticating user.
 
         See search for example of how results are returned."""
-        return self.__get("/statuses/replies.atom", delegate, params, extra_args=extra_args)
+        return self.__get("/statuses/replies.atom", delegate, params,
+                          extra_args=extra_args)
 
     def follow(self, user):
         """Follow the given user.
@@ -217,12 +222,12 @@ class Twitter(object):
         else:
             url = self.base_url + '/statuses/friends.xml'
         if params:
-            url += '?' + self.__urlencode(params)
+            url += '?' + self._urlencode(params)
 
         if self.use_oauth:
             headers = self.__makeOAuthHeader('GET', url)
         else:
-            headers = self.__makeAuthHeader()
+            headers = self._makeAuthHeader()
 
         return client.downloadPage(url, txml.Users(delegate, extra_args),
             headers=headers)
@@ -236,12 +241,12 @@ class Twitter(object):
         else:
             url = self.base_url + '/statuses/followers.xml'
         if params:
-            url += '?' + self.__urlencode(params)
+            url += '?' + self._urlencode(params)
 
         if self.use_oauth:
             headers = self.__makeOAuthHeader('GET', url)
         else:
-            headers = self.__makeAuthHeader()
+            headers = self._makeAuthHeader()
 
         return client.downloadPage(url, txml.Users(delegate, extra_args),
             headers=headers)
@@ -272,7 +277,7 @@ class Twitter(object):
         if args is None:
             args = {}
         args['q'] = query
-        return client.downloadPage(self.search_url + '?' + self.__urlencode(args),
+        return client.downloadPage(self.search_url + '?' + self._urlencode(args),
             txml.Feed(delegate, extra_args), agent=self.agent)
 
     def block(self, user):
@@ -293,7 +298,8 @@ class Twitter(object):
 
         Returns no useful data."""
 
-        return self.__postMultipart('/account/update_profile_image.xml', files=(('image', filename, image),))
+        return self.__postMultipart('/account/update_profile_image.xml',
+                                    files=(('image', filename, image),))
 
 class TwitterFeed(Twitter):
     """Realtime feed handling class.
@@ -322,3 +328,21 @@ class TwitterFeed(Twitter):
     def firehose(self, delegate, args=None):
         """Get the firehose feed."""
         return self._rtfeed("http://stream.twitter.com/firehose.xml", delegate, args)
+
+    def follow(self, delegate, follow, method="follow"):
+        """Follow up to 200 users in realtime."""
+        return self._rtfeed("http://stream.twitter.com/%s.xml" % method,
+                            delegate, {'follow': ','.join(follow)})
+
+    def birddog(self, delegate, follow):
+        """Follow up to 200,000 users in realtime."""
+        return self.follow(delegate, follow, 'birddog')
+
+    def shadow(self, delegate, follow):
+        """Follow up to 2,000 users in realtime."""
+        return self.follow(delegate, follow, 'shadow')
+
+    def track(self, delegate, terms):
+        """Track up to 20 terms."""
+        return self._rtfeed('http://stream.twitter.com/track.xml',
+                            delegate, {'track': ','.join(terms)})

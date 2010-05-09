@@ -11,17 +11,34 @@ import urllib
 import mimetypes
 import mimetools
 
-import oauth
+from oauth import oauth
 
 from twisted.internet import defer
 from twisted.web import client
 
-from . import txml
+import txml
 
 SIGNATURE_METHOD = oauth.OAuthSignatureMethod_HMAC_SHA1()
 
 BASE_URL="http://twitter.com"
 SEARCH_URL="http://search.twitter.com/search.atom"
+
+class TwitterClientInfo:
+    def __init__ (self, name, version = None, url = None):
+        self.name = name
+        self.version = version
+        self.url = url
+
+    def get_headers (self):
+        headers = [
+                ('X-Twitter-Client',self.name),
+                ('X-Twitter-Client-Version',self.version),
+                ('X-Twitter-Client-URL',self.url),
+                ]
+        return dict(filter(lambda x: x[1] != None, headers))
+
+    def get_source (self):
+        return self.name
 
 class Twitter(object):
 
@@ -29,20 +46,30 @@ class Twitter(object):
 
     def __init__(self, user=None, passwd=None,
         base_url=BASE_URL, search_url=SEARCH_URL,
-                 consumer=None, token=None, signature_method=SIGNATURE_METHOD):
+                 consumer=None, token=None, signature_method=SIGNATURE_METHOD,client_info = None):
 
         self.base_url = base_url
         self.search_url = search_url
 
+        self.use_auth = False
+        self.use_oauth = False
+        self.client_info = None
+
         if user and passwd:
-            self.use_oauth = False
+            self.use_auth = True
             self.username = user
             self.password = passwd
-        else:
+
+        if consumer and token:
+            self.use_auth = True
             self.use_oauth = True
             self.consumer = consumer
             self.token = token
             self.signature_method = signature_method
+
+        if client_info != None:
+            self.client_info = client_info
+
 
     def __makeOAuthHeader(self, method, url, parameters={}, headers={}):
         oauth_request = oauth.OAuthRequest.from_consumer_and_token(self.consumer,
@@ -51,8 +78,6 @@ class Twitter(object):
 
         headers = dict(headers.items() + oauth_request.to_header().items())
 
-        #for k, v in headers.iteritems():
-        #    headers[k] = v.encode('utf-8')
         return headers
 
     def _makeAuthHeader(self, headers={}):
@@ -126,6 +151,10 @@ class Twitter(object):
         else:
             headers = self._makeAuthHeader(headers)
 
+        if self.client_info != None:
+            headers.update(self.client_info.get_headers())
+            args['source'] = self.client_info.get_source()
+
         return client.getPage(url, method='POST',
             agent=self.agent,
             postdata=self._urlencode(args), headers=headers)
@@ -135,17 +164,20 @@ class Twitter(object):
         if params:
             url += '?' + self._urlencode(params)
 
-        if self.use_oauth:
-            headers = self.__makeOAuthHeader('GET', url)
+        if self.use_auth:
+            if self.use_oauth:
+                headers = self.__makeOAuthHeader('GET', url)
+            else:
+                headers = self._makeAuthHeader()
         else:
-            headers = self._makeAuthHeader()
+            headers = {}
 
         return client.downloadPage(url, feed_factory(delegate, extra_args),
             agent=self.agent, headers=headers)
 
     def verify_credentials(self):
         "Verify a user's credentials."
-        return self.__get("/account/verify_credentials.xml", None, None)
+        return self.__get('/account/verify_credentials.xml', None, None)
 
     def __parsed_post(self, hdef, parser):
         deferred = defer.Deferred()
@@ -158,14 +190,14 @@ class Twitter(object):
         params={'status': status}
         if source:
             params['source'] = source
-        return self.__parsed_post(self.__post("/statuses/update.xml", params),
+        return self.__parsed_post(self.__post('/statuses/update.xml', params),
             txml.parseUpdateResponse)
 
     def friends(self, delegate, params={}, extra_args=None):
         """Get updates from friends.
 
         Calls the delgate once for each status object received."""
-        return self.__get("/statuses/friends_timeline.xml", delegate, params,
+        return self.__get('/statuses/friends_timeline.xml', delegate, params,
             txml.StatusList, extra_args=extra_args)
 
     def user_timeline(self, delegate, user=None, params={}, extra_args=None):
@@ -177,13 +209,13 @@ class Twitter(object):
         See search for example of how results are returned."""
         if user:
             params['id'] = user
-        return self.__get("/statuses/user_timeline.xml", delegate, params,
+        return self.__get('/statuses/user_timeline.xml', delegate, params,
                           txml.StatusList, extra_args=extra_args)
 
     def public_timeline(self, delegate, params={}, extra_args=None):
         "Get the most recent public timeline."
 
-        return self.__get("/statuses/public_timeline.atom", delegate, params,
+        return self.__get('/statuses/public_timeline.atom', delegate, params,
                           extra_args=extra_args)
 
     def direct_messages(self, delegate, params={}, extra_args=None):
@@ -191,14 +223,14 @@ class Twitter(object):
 
         Search results are returned one message at a time a DirectMessage
         objects"""
-        return self.__get("/direct_messages.xml", delegate, params,
+        return self.__get('/direct_messages.xml', delegate, params,
                           txml.Direct, extra_args=extra_args)
 
     def replies(self, delegate, params={}, extra_args=None):
         """Get the most recent replies for the authenticating user.
 
         See search for example of how results are returned."""
-        return self.__get("/statuses/replies.atom", delegate, params,
+        return self.__get('/statuses/replies.atom', delegate, params,
                           extra_args=extra_args)
 
     def follow(self, user):
@@ -256,14 +288,19 @@ class Twitter(object):
 
         Returns a delegate that will receive the user in a callback."""
 
+        url = '%s/users/show/%s.xml' % (self.base_url, user)
         d = defer.Deferred()
-        if self.username and self.password:
-            h = self._makeAuthHeader()
+        if self.use_auth:
+            if self.use_oauth:
+                h = self.__makeOAuthHeader('GET', url)
+            else:
+                h = self._makeAuthHeader()
         else:
             h = {}
-        url = '%s/users/show/%s.xml' % (self.base_url, user)
+
         client.downloadPage(url, txml.Users(lambda u: d.callback(u)),
-            headers={}).addErrback(lambda e: d.errback(e))
+            headers=h).addErrback(lambda e: d.errback(e))
+
         return d
 
     def search(self, query, delegate, args=None, extra_args=None):
@@ -302,47 +339,114 @@ class Twitter(object):
                                     files=(('image', filename, image),))
 
 class TwitterFeed(Twitter):
-    """Realtime feed handling class.
+    """
+    Realtime feed handling class.
 
-    Results are given one at a time to the delegate.  An example delegate
-    may look like this:
+    Results are given one at a time to the delegate. An example delegate
+    may look like this::
 
-    def exampleDelegate(entry):
-        print entry.text"""
+        def exampleDelegate(entry):
+            print entry.text
+    """
 
     def _rtfeed(self, url, delegate, args):
         if args:
-            url += "?" + self._urlencode(args)
-        print "Fetching", url
+            url += '?' + self._urlencode(args)
+        print 'Fetching', url
         return client.downloadPage(url, txml.HoseFeed(delegate), agent=self.agent,
                                    headers=self._makeAuthHeader())
 
+
+    def sample(self, delegate, args=None):
+        """
+        Returns a random sample of all public statuses.
+
+        The actual access level determines the portion of the firehose.
+        """
+        return self._rtfeed('http://stream.twitter.com/1/statuses/sample.xml',
+                            delegate,
+                            args)
+
+
     def spritzer(self, delegate, args=None):
-        """Get the spritzer feed."""
-        return self._rtfeed("http://stream.twitter.com/spritzer.xml", delegate, args)
+        """
+        Get the spritzer feed.
+
+        The API method 'spritzer' is deprecated. This method is provided for
+        backwards compatibility. Use L{sample} instead.
+        """
+        return self.sample(delegate, args)
+
 
     def gardenhose(self, delegate, args=None):
-        """Get the gardenhose feed."""
-        return self._rtfeed("http://stream.twitter.com/gardenhose.xml", delegate, args)
+        """
+        Get the gardenhose feed.
+
+        The API method 'gardenhose' is deprecated. This method is provided for
+        backwards compatibility. Use L{sample} instead.
+        """
+        return self.sample(delegate, args=None)
+
 
     def firehose(self, delegate, args=None):
-        """Get the firehose feed."""
-        return self._rtfeed("http://stream.twitter.com/firehose.xml", delegate, args)
+        """
+        Returns all public statuses.
+        """
+        return self._rtfeed('http://stream.twitter.com/1/statuses/firehose.xml',
+                            delegate,
+                            args)
 
-    def follow(self, delegate, follow, method="follow"):
-        """Follow up to 200 users in realtime."""
-        return self._rtfeed("http://stream.twitter.com/%s.xml" % method,
-                            delegate, {'follow': ','.join(follow)})
+
+    def filter(self, delegate, args=None):
+        """
+        Returns public statuses that match one or more filter predicates.
+        """
+        return self._rtfeed('http://stream.twitter.com/1/statuses/filter.xml',
+                            delegate,
+                            args)
+
+
+    def follow(self, delegate, follow):
+        """
+        Returns public statuses from or in reply to a set of users.
+
+        Note that the old API method 'follow' is deprecated. This method
+        is backwards compatible and provides a shorthand to L{filter}. The
+        actual allowed number of user IDs depends on the access level of the
+        used account.
+        """
+        return self.filter(delegate, {'follow': ','.join(follow)})
+
 
     def birddog(self, delegate, follow):
-        """Follow up to 200,000 users in realtime."""
-        return self.follow(delegate, follow, 'birddog')
+        """
+        Follow up to 200,000 users in realtime.
+
+        The API method `birddog` is deprecated. This method is provided for
+        backwards compatibility. Use L{follow} or L{filter} instead.
+        """
+        return self.follow(delegate, follow)
+
 
     def shadow(self, delegate, follow):
-        """Follow up to 2,000 users in realtime."""
+        """
+        Follow up to 2,000 users in realtime.
+
+        The API method `birddog` is deprecated. This method is provided for
+        backwards compatibility. Use L{follow} or L{filter} instead.
+        """
         return self.follow(delegate, follow, 'shadow')
 
+
     def track(self, delegate, terms):
-        """Track up to 20 terms."""
-        return self._rtfeed('http://stream.twitter.com/track.xml',
-                            delegate, {'track': ','.join(terms)})
+        """
+        Returns public statuses matching a set of keywords.
+
+        Note that the old API method 'follow' is deprecated. This method is
+        backwards compatible and provides a shorthand to L{filter}. The actual
+        allowed number of keywords in C{terms} depends on the access level of
+        the used account.
+        """
+        return self.filter(delegate, {'track': ','.join(terms)})
+
+# vim: set expandtab:

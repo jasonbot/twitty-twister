@@ -15,17 +15,13 @@ from twisted.internet import reactor
 import twitter
 from oauth import oauth
 
-def gotUser(user):
-    print "User:  %s (%s)" % (user.name, user.screen_name)
-
-un=None
-if len(sys.argv) > 5:
-    un=sys.argv[5]
+def gotUser(u):
+    print "Got a user: %s" % u
 
 consumer = oauth.OAuthConsumer(sys.argv[1], sys.argv[2])
 token = oauth.OAuthToken(sys.argv[3], sys.argv[4])
 
-twitter.Twitter(consumer=consumer, token=token).list_friends(gotUser, un).addBoth(
-    lambda x: reactor.stop())
+twitter.Twitter(consumer=consumer, token=token).show_user(sys.argv[5]).addCallback(
+    gotUser).addBoth(lambda x: reactor.stop())
 
 reactor.run()

@@ -2,23 +2,23 @@
 """
 
 Copyright (c) 2008  Dustin Sallings <dustin@spy.net>
+Copyright (c) 2009  Bogdano Arendartchuk <debogdano@gmail.com>
 """
 
 import os
 import sys
 
+sys.path.append(os.path.join(sys.path[0], '..', 'twittytwister'))
+sys.path.append('twittytwister')
+
 from twisted.internet import reactor, protocol, defer, task
 
-<<<<<<< HEAD
-from twitty import twitter
-=======
-from twittytwister import twitter
->>>>>>> c130d77e07bc7a1d81ef607d630e39b94614446e
+import twitter
 
 fetchCount = 0
 
 @defer.deferredGenerator
-def getSome(tw, user):
+def getSome(tw, list_user, list_name):
     global fetchCount
     fetchCount = 0
 
@@ -30,8 +30,10 @@ def getSome(tw, user):
     page = 1
     while True:
         fetchCount = 0
-        sys.stderr.write("Fetching page %d for %s\n" % (page, user))
-        d = tw.user_timeline(gotEntry, user, {'count': '200', 'page': str(page)})
+        sys.stderr.write("Fetching page %d for %s/%s\n" % (page, list_user,
+            list_name))
+        d = tw.list_timeline(gotEntry, list_user, list_name,
+                {'count': '200', 'page': str(page)})
         page += 1
         wfd = defer.waitForDeferred(d)
         yield wfd
@@ -41,11 +43,11 @@ def getSome(tw, user):
             reactor.stop()
 
 user = sys.argv[1]
-if len(sys.argv) > 3:
-    user = sys.argv[3]
+list_user = sys.argv[3]
+list_name = sys.argv[4]
 
 tw = twitter.Twitter(sys.argv[1], sys.argv[2])
 
-defer.maybeDeferred(getSome, tw, user)
+defer.maybeDeferred(getSome, tw, list_user, list_name)
 
 reactor.run()

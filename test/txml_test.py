@@ -10,11 +10,12 @@ import sys
 sys.path.append("twittytwister")
 sys.path.append("../twittytwister")
 
-from twisted.trial import unittest
+from twisted.trial import unittest as twunit
+import unittest
 
 from twitty import txml
 
-class XMLParserTest(unittest.TestCase):
+class XMLParserTest(twunit.TestCase):
 
     def parse_test(self, filename, parser):
         with open("../test/" + filename) as f:
@@ -136,7 +137,7 @@ class XMLParserTest(unittest.TestCase):
                 ts.assertEquals('false', s.user.protected)
                 ts.assertEquals('516', s.user.followers_count)
 
-        self.parse_test('status_list.xml', txml.StatusList(gotStatusItem))
+        self.parse_test('status_list.xml', txml.Statuses(gotStatusItem))
 
     def testParsingUser(self):
         ts = self

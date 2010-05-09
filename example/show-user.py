@@ -7,12 +7,13 @@ Copyright (c) 2008  Dustin Sallings <dustin@spy.net>
 import os
 import sys
 
-sys.path.append(os.path.join(sys.path[0], '..', 'twittytwister'))
-sys.path.append('twittytwister')
-
 from twisted.internet import reactor, protocol, defer, task
 
+<<<<<<< HEAD
 from twitty import twitter
+=======
+from twittytwister import twitter
+>>>>>>> c130d77e07bc7a1d81ef607d630e39b94614446e
 
 def gotUser(u):
     print "Got a user: %s" % u

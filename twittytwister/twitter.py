@@ -10,18 +10,44 @@ import base64
 import urllib
 import mimetypes
 import mimetools
+import logging
 
 from oauth import oauth
 
-from twisted.internet import defer
+from twisted.internet import defer, reactor
 from twisted.web import client
 
 import txml
 
 SIGNATURE_METHOD = oauth.OAuthSignatureMethod_HMAC_SHA1()
 
-BASE_URL="http://twitter.com"
+BASE_URL="https://twitter.com"
 SEARCH_URL="http://search.twitter.com/search.atom"
+
+
+logger = logging.getLogger('twittytwister.twitter')
+
+
+##### ugly hack to work around a bug on HTTPDownloader on Twisted 8.2.0 (fixed on 9.0.0)
+def install_twisted_fix():
+    orig_method = client.HTTPDownloader.gotHeaders
+    def gotHeaders(self, headers):
+        client.HTTPClientFactory.gotHeaders(self, headers)
+        orig_method(self, headers)
+    client.HTTPDownloader.gotHeaders = gotHeaders
+
+def buggy_twisted():
+    o = client.HTTPDownloader('http://dummy-url/foo', None)
+    client.HTTPDownloader.gotHeaders(o, {})
+    if o.response_headers is None:
+        return True
+    return False
+
+if buggy_twisted():
+    install_twisted_fix()
+
+##### end of hack
+
 
 class TwitterClientInfo:
     def __init__ (self, name, version = None, url = None):
@@ -40,13 +66,46 @@ class TwitterClientInfo:
     def get_source (self):
         return self.name
 
+
+def __downloadPage(factory, *args, **kwargs):
+    """Start a HTTP download, returning a HTTPDownloader object"""
+
+    # The Twisted API is weird:
+    # 1) web.client.downloadPage() doesn't give us the HTTP headers
+    # 2) there is no method that simply accepts a URL and gives you back
+    #    a HTTPDownloader object
+
+    #TODO: convert getPage() usage to something similar, too
+
+    downloader = factory(*args, **kwargs)
+    if downloader.scheme == 'https':
+        from twisted.internet import ssl
+        contextFactory = ssl.ClientContextFactory()
+        reactor.connectSSL(downloader.host, downloader.port,
+                           downloader, contextFactory)
+    else:
+        reactor.connectTCP(downloader.host, downloader.port,
+                           downloader)
+    return downloader
+
+def downloadPage(url, file, timeout=0, **kwargs):
+    c = __downloadPage(client.HTTPDownloader, url, file, **kwargs)
+    # HTTPDownloader doesn't have the 'timeout' keyword parameter on
+    # Twisted 8.2.0, so set it directly:
+    if timeout:
+        c.timeout = timeout
+    return c
+
+def getPage(url, *args, **kwargs):
+    return __downloadPage(client.HTTPClientFactory, url, *args, **kwargs)
+
 class Twitter(object):
 
     agent="twitty twister"
 
     def __init__(self, user=None, passwd=None,
         base_url=BASE_URL, search_url=SEARCH_URL,
-                 consumer=None, token=None, signature_method=SIGNATURE_METHOD,client_info = None):
+                 consumer=None, token=None, signature_method=SIGNATURE_METHOD,client_info = None, timeout=0):
 
         self.base_url = base_url
         self.search_url = search_url
@@ -54,6 +113,12 @@ class Twitter(object):
         self.use_auth = False
         self.use_oauth = False
         self.client_info = None
+        self.timeout = timeout
+
+        # rate-limit info:
+        self.rate_limit_limit = None
+        self.rate_limit_remaining = None
+        self.rate_limit_reset = None
 
         if user and passwd:
             self.use_auth = True
@@ -76,15 +141,26 @@ class Twitter(object):
             token=self.token, http_method=method, http_url=url, parameters=parameters)
         oauth_request.sign_request(self.signature_method, self.consumer, self.token)
 
-        headers = dict(headers.items() + oauth_request.to_header().items())
-
+        headers.update(oauth_request.to_header())
         return headers
 
-    def _makeAuthHeader(self, headers={}):
+    def __makeAuthHeader(self, headers={}):
         authorization = base64.encodestring('%s:%s'
             % (self.username, self.password))[:-1]
         headers['Authorization'] = "Basic %s" % authorization
         return headers
+
+    def _makeAuthHeader(self, method, url, parameters={}, headers={}):
+        if self.use_oauth:
+            return self.__makeOAuthHeader(method, url, parameters, headers)
+        else:
+            return self.__makeAuthHeader(headers)
+
+    def makeAuthHeader(self, method, url, parameters={}, headers={}):
+        if self.use_auth:
+            return self._makeAuthHeader(method, url, parameters, headers)
+        else:
+            return headers
 
     def _urlencode(self, h):
         rv = []
@@ -121,8 +197,38 @@ class Twitter(object):
 
         return boundary, body
 
+    def gotHeaders(self, headers):
+        logger.debug("hdrs: %r", headers)
+        if headers is None:
+            return
+
+        def ratelimit_header(name):
+            hdr = 'x-ratelimit-%s' % (name)
+            field = 'rate_limit_%s' % (name)
+            r = headers.get(hdr)
+            if r is not None and len(r) > 0 and r[0]:
+                v = int(r[0])
+                setattr(self, field, v)
+            else:
+                return None
+
+        ratelimit_header('limit')
+        ratelimit_header('remaining')
+        ratelimit_header('reset')
+
+        logger.debug('hdrs end')
+
+
     def __getContentType(self, filename):
         return mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+
+    def __clientDefer(self, c):
+        """Return a deferred for a HTTP client, after handling incoming headers"""
+        def handle_headers(r):
+            self.gotHeaders(c.response_headers)
+            return r
+
+        return c.deferred.addBoth(handle_headers)
 
     def __postMultipart(self, path, fields=(), files=()):
         url = self.base_url + path
@@ -132,52 +238,67 @@ class Twitter(object):
             'Content-Length': str(len(body))
             }
 
-        if self.use_oauth:
-            headers = self.__makeOAuthHeader('POST', url, headers=headers)
-        else:
-            headers = self._makeAuthHeader(h)
+        self._makeAuthHeader('POST', url, headers=headers)
 
-        return client.getPage(url, method='POST',
+        c = getPage(url, method='POST',
             agent=self.agent,
-            postdata=body, headers=headers)
+            postdata=body, headers=headers, timeout=self.timeout)
+        return self.__clientDefer(c)
 
+    #TODO: deprecate __post()?
     def __post(self, path, args={}):
         headers = {'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8'}
 
         url = self.base_url + path
 
-        if self.use_oauth:
-            headers = self.__makeOAuthHeader('POST', url, args, headers)
-        else:
-            headers = self._makeAuthHeader(headers)
+        self._makeAuthHeader('POST', url, args, headers)
 
         if self.client_info != None:
             headers.update(self.client_info.get_headers())
             args['source'] = self.client_info.get_source()
 
-        return client.getPage(url, method='POST',
+        c = getPage(url, method='POST',
             agent=self.agent,
-            postdata=self._urlencode(args), headers=headers)
+            postdata=self._urlencode(args), headers=headers, timeout=self.timeout)
+        return self.__clientDefer(c)
 
-    def __get(self, path, delegate, params, feed_factory=txml.Feed, extra_args=None):
+    def __doDownloadPage(self, *args, **kwargs):
+        """Works like client.downloadPage(), but handle incoming headers
+        """
+        logger.debug("download page: %r, %r", args, kwargs)
+
+        return self.__clientDefer(downloadPage(*args, **kwargs))
+
+    def __postPage(self, path, parser, args={}):
         url = self.base_url + path
+        headers = self.makeAuthHeader('POST', url, args)
+
+        if self.client_info != None:
+            headers.update(self.client_info.get_headers())
+            args['source'] = self.client_info.get_source()
+
+        return self.__doDownloadPage(url, parser, method='POST',
+            agent=self.agent,
+            postdata=self._urlencode(args), headers=headers, timeout=self.timeout)
+
+    def __downloadPage(self, path, parser, params=None):
+        url = self.base_url + path
+
+        headers = self.makeAuthHeader('GET', url, params)
         if params:
             url += '?' + self._urlencode(params)
 
-        if self.use_auth:
-            if self.use_oauth:
-                headers = self.__makeOAuthHeader('GET', url)
-            else:
-                headers = self._makeAuthHeader()
-        else:
-            headers = {}
+        return self.__doDownloadPage(url, parser,
+            agent=self.agent, headers=headers, timeout=self.timeout)
 
-        return client.downloadPage(url, feed_factory(delegate, extra_args),
-            agent=self.agent, headers=headers)
+    def __get(self, path, delegate, params, parser_factory=txml.Feed, extra_args=None):
+        parser = parser_factory(delegate, extra_args)
+        return self.__downloadPage(path, parser, params)
 
-    def verify_credentials(self):
+    def verify_credentials(self, delegate=None):
         "Verify a user's credentials."
-        return self.__get('/account/verify_credentials.xml', None, None)
+        parser = txml.Users(delegate)
+        return self.__downloadPage('/account/verify_credentials.xml', parser)
 
     def __parsed_post(self, hdef, parser):
         deferred = defer.Deferred()
@@ -185,20 +306,40 @@ class Twitter(object):
         hdef.addCallback(lambda p: deferred.callback(parser(p)))
         return deferred
 
-    def update(self, status, source=None):
+    def update(self, status, source=None, params={}):
         "Update your status.  Returns the ID of the new post."
-        params={'status': status}
+        params = params.copy()
+        params['status'] = status
         if source:
             params['source'] = source
         return self.__parsed_post(self.__post('/statuses/update.xml', params),
             txml.parseUpdateResponse)
+
+    def retweet(self, id, delegate):
+        """Retweet a post
+
+        Returns the retweet status info back to the given delegate
+        """
+        parser = txml.Statuses(delegate)
+        return self.__postPage('/statuses/retweet/%s.xml' % (id), parser)
 
     def friends(self, delegate, params={}, extra_args=None):
         """Get updates from friends.
 
         Calls the delgate once for each status object received."""
         return self.__get('/statuses/friends_timeline.xml', delegate, params,
-            txml.StatusList, extra_args=extra_args)
+            txml.Statuses, extra_args=extra_args)
+
+    def home_timeline(self, delegate, params={}, extra_args=None):
+        """Get updates from friends.
+
+        Calls the delgate once for each status object received."""
+        return self.__get('/statuses/home_timeline.xml', delegate, params,
+            txml.Statuses, extra_args=extra_args)
+
+    def mentions(self, delegate, params={}, extra_args=None):
+        return self.__get('/statuses/mentions.xml', delegate, params,
+            txml.Statuses, extra_args=extra_args)
 
     def user_timeline(self, delegate, user=None, params={}, extra_args=None):
         """Get the most recent updates for a user.
@@ -210,7 +351,12 @@ class Twitter(object):
         if user:
             params['id'] = user
         return self.__get('/statuses/user_timeline.xml', delegate, params,
-                          txml.StatusList, extra_args=extra_args)
+                          txml.Statuses, extra_args=extra_args)
+
+    def list_timeline(self, delegate, user, list_name, params={},
+            extra_args=None):
+        return self.__get('/%s/lists/%s/statuses.xml' % (user, list_name),
+                delegate, params, txml.Statuses, extra_args=extra_args)
 
     def public_timeline(self, delegate, params={}, extra_args=None):
         "Get the most recent public timeline."
@@ -225,6 +371,20 @@ class Twitter(object):
         objects"""
         return self.__get('/direct_messages.xml', delegate, params,
                           txml.Direct, extra_args=extra_args)
+
+    def send_direct_message(self, text, user=None, delegate=None, screen_name=None, user_id=None, params={}):
+        """Send a direct message
+        """
+        params = params.copy()
+        if user is not None:
+            params['user'] = user
+        if user_id is not None:
+            params['user_id'] = user_id
+        if screen_name is not None:
+            params['screen_name'] = screen_name
+        params['text'] = text
+        parser = txml.Direct(delegate)
+        return self.__postPage('/direct_messages/new.xml', parser, params)
 
     def replies(self, delegate, params={}, extra_args=None):
         """Get the most recent replies for the authenticating user.
@@ -245,61 +405,90 @@ class Twitter(object):
         Returns no useful data."""
         return self.__post('/friendships/destroy/%s.xml' % user)
 
-    def list_friends(self, delegate, user=None, params=None, extra_args=None):
+    def follow_user(self, user, delegate):
+        """Follow the given user.
+
+        Returns the user info back to the given delegate
+        """
+        parser = txml.Users(delegate)
+        return self.__postPage('/friendships/create/%s.xml' % (user), parser)
+
+    def unfollow_user(self, user, delegate):
+        """Unfollow the given user.
+
+        Returns the user info back to the given delegate
+        """
+        parser = txml.Users(delegate)
+        return self.__postPage('/friendships/destroy/%s.xml' % (user), parser)
+
+    def __paging_get(self, url, delegate, params, pager, page_delegate=None):
+        def end_page(p):
+            if page_delegate:
+                page_delegate(p.next_cursor, p.previous_cursor)
+
+        parser = pager.pagingParser(delegate, page_delegate=end_page)
+        return self.__downloadPage(url, parser, params)
+
+    def __nopaging_get(self, url, delegate, params, pager):
+        parser = pager.noPagingParser(delegate)
+        return self.__downloadPage(url, parser, params)
+
+    def __get_maybe_paging(self, url, delegate, params, pager, extra_args=None, page_delegate=None):
+        if extra_args is None:
+            eargs = ()
+        else:
+            eargs = (extra_args,)
+
+        def do_delegate(i):
+            delegate(i, *eargs)
+
+        if params.has_key('cursor'):
+            return self.__paging_get(url, delegate, params, pager, page_delegate)
+        else:
+            return self.__nopaging_get(url, delegate, params, pager)
+
+
+    def list_friends(self, delegate, user=None, params={}, extra_args=None, page_delegate=None):
         """Get the list of friends for a user.
 
         Calls the delegate with each user object found."""
         if user:
-            url = self.base_url + '/statuses/friends/' + user + '.xml'
+            url = '/statuses/friends/' + user + '.xml'
         else:
-            url = self.base_url + '/statuses/friends.xml'
-        if params:
-            url += '?' + self._urlencode(params)
+            url = '/statuses/friends.xml'
 
-        if self.use_oauth:
-            headers = self.__makeOAuthHeader('GET', url)
-        else:
-            headers = self._makeAuthHeader()
+        return self.__get_maybe_paging(url, delegate, params, txml.PagedUserList, extra_args, page_delegate)
 
-        return client.downloadPage(url, txml.Users(delegate, extra_args),
-            headers=headers)
-
-    def list_followers(self, delegate, user=None, params=None, extra_args=None):
+    def list_followers(self, delegate, user=None, params=None, extra_args=None, page_delegate=None):
         """Get the list of followers for a user.
 
         Calls the delegate with each user object found."""
         if user:
-            url = self.base_url + '/statuses/followers/' + user + '.xml'
+            url = '/statuses/followers/' + user + '.xml'
         else:
-            url = self.base_url + '/statuses/followers.xml'
-        if params:
-            url += '?' + self._urlencode(params)
+            url = '/statuses/followers.xml'
 
-        if self.use_oauth:
-            headers = self.__makeOAuthHeader('GET', url)
-        else:
-            headers = self._makeAuthHeader()
+        return self.__get_maybe_paging(url, delegate, params, txml.PagedUserList, extra_args, page_delegate)
 
-        return client.downloadPage(url, txml.Users(delegate, extra_args),
-            headers=headers)
+    def friends_ids(self, delegate, user, params={}, extra_args=None, page_delegate=None):
+        return self.__get_maybe_paging('/friends/ids/%s.xml' % (user), delegate, params, txml.PagedIDList, extra_args, page_delegate)
+
+    def followers_ids(self, delegate, user, params={}, extra_args=None, page_delegate=None):
+        return self.__get_maybe_paging('/followers/ids/%s.xml' % (user), delegate, params, txml.PagedIDList, extra_args, page_delegate)
+
+    def list_members(self, delegate, user, list_name, params={}, extra_args=None, page_delegate=None):
+        return self.__get_maybe_paging('/%s/%s/members.xml' % (user, list_name), delegate, params, txml.PagedUserList, extra_args, page_delegate=page_delegate)
 
     def show_user(self, user):
         """Get the info for a specific user.
 
         Returns a delegate that will receive the user in a callback."""
 
-        url = '%s/users/show/%s.xml' % (self.base_url, user)
+        url = '/users/show/%s.xml' % (user)
         d = defer.Deferred()
-        if self.use_auth:
-            if self.use_oauth:
-                h = self.__makeOAuthHeader('GET', url)
-            else:
-                h = self._makeAuthHeader()
-        else:
-            h = {}
 
-        client.downloadPage(url, txml.Users(lambda u: d.callback(u)),
-            headers=h).addErrback(lambda e: d.errback(e))
+        self.__downloadPage(url, txml.Users(lambda u: d.callback(u))) \
+            .addErrback(lambda e: d.errback(e))
 
         return d
 
@@ -314,7 +503,7 @@ class Twitter(object):
         if args is None:
             args = {}
         args['q'] = query
-        return client.downloadPage(self.search_url + '?' + self._urlencode(args),
+        return self.__doDownloadPage(self.search_url + '?' + self._urlencode(args),
             txml.Feed(delegate, extra_args), agent=self.agent)
 
     def block(self, user):
@@ -352,9 +541,10 @@ class TwitterFeed(Twitter):
     def _rtfeed(self, url, delegate, args):
         if args:
             url += '?' + self._urlencode(args)
+        headers = headers=self._makeAuthHeader("GET", url, args)
         print 'Fetching', url
-        return client.downloadPage(url, txml.HoseFeed(delegate), agent=self.agent,
-                                   headers=self._makeAuthHeader())
+        return downloadPage(url, txml.HoseFeed(delegate), agent=self.agent,
+                                   headers=headers).deferred
 
 
     def sample(self, delegate, args=None):

@@ -12,6 +12,9 @@ setup(name='twittytwister',
     platforms='any',
     packages=['twittytwister'],
 )
+<<<<<<< HEAD
 
 # vim: set expandtab:
 
+=======
+>>>>>>> c130d77e07bc7a1d81ef607d630e39b94614446e
